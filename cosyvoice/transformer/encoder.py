@@ -383,6 +383,52 @@ class TransformerEncoder(BaseEncoder):
                 dropout_rate, normalize_before) for _ in range(num_blocks)
         ])
 
+    def forward(
+        self,
+        xs: torch.Tensor,
+        offset: int,
+        required_cache_size: int,
+        att_cache: torch.Tensor = torch.zeros(0, 0, 0, 0),
+        cnn_cache: torch.Tensor = torch.zeros(0, 0, 0, 0),
+        att_mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        seq = xs.shape[1]
+
+        tmp_masks = torch.ones(1,
+                               xs.size(1),
+                               device=xs.device,
+                               dtype=torch.bool)
+        tmp_masks = tmp_masks.unsqueeze(1)
+        if self.global_cmvn is not None:
+            xs = self.global_cmvn(xs)
+
+        xs, pos_emb, _ = self.embed(xs, tmp_masks, offset)
+
+        _, cache_t1 = att_cache.size(0), att_cache.size(2)
+        chunk_size = xs.size(1)
+        attention_key_size = cache_t1 + chunk_size
+        pos_emb = self.embed.position_encoding(offset=offset - cache_t1,
+                                               size=attention_key_size)
+
+        r_att_cache = []
+
+        for i, layer in enumerate(self.encoders):
+            xs, _, new_att_cache, _ = layer(
+                xs,
+                att_mask,
+                pos_emb,
+                att_cache=att_cache[i:i+1] if seq == 1 else att_cache,
+                cnn_cache=cnn_cache)
+            r_att_cache.append(new_att_cache)
+
+        if self.normalize_before:
+            xs = self.after_norm(xs)
+
+        r_att_cache = torch.cat(r_att_cache, dim=0)
+
+        return (xs, r_att_cache, None)
+
 
 class ConformerEncoder(BaseEncoder):
     """Conformer encoder module."""

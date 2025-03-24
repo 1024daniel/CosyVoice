@@ -14,6 +14,7 @@
 import threading
 import torch
 import torch.nn.functional as F
+import numpy as np
 from matcha.models.components.flow_matching import BASECFM
 
 
@@ -32,6 +33,7 @@ class ConditionalCFM(BASECFM):
         # Just change the architecture of the estimator here
         self.estimator = estimator
         self.lock = threading.Lock()
+        self.flow_om = None
 
     @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, prompt_len=0, flow_cache=torch.zeros(1, 80, 0, 2)):
@@ -105,12 +107,26 @@ class ConditionalCFM(BASECFM):
             t_in[:] = t.unsqueeze(0)
             spks_in[0] = spks
             cond_in[0] = cond
-            dphi_dt = self.forward_estimator(
-                x_in, mask_in,
-                mu_in, t_in,
-                spks_in,
-                cond_in
-            )
+            # dphi_dt = self.forward_estimator(
+            #     x_in, mask_in,
+            #     mu_in, t_in,
+            #     spks_in,
+            #     cond_in
+            # )
+            if torch.npu.is_available():
+                feed_list = [x_in, mask_in, mu_in, t_in, spks_in, cond_in]
+                feed = [i.cpu().detach().numpy().astype(np.float32)
+                        for i in feed_list]
+                dphi_dt = self.flow_om.infer(
+                    feed, mode="dymshape", custom_sizes=10000000)
+                dphi_dt = torch.from_numpy(dphi_dt[0]).npu()
+            else:
+                dphi_dt = self.forward_estimator(
+                    x_in, mask_in,
+                    mu_in, t_in,
+                    spks_in,
+                    cond_in
+                )
             dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
             dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
             x = x + dt * dphi_dt
